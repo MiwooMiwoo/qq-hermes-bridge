@@ -101,7 +101,6 @@ journalctl --user -u qq-hermes-bridge -f
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `PROGRESS_RATE_LIMIT_SECONDS` | `15` | 进度卡片发送最小间隔（秒） |
 | `PROGRESS_AS_IMAGE` | `true` | 是否以图片形式发送进度 |
 | `PROGRESS_MAX_TOOLS` | `12` | 进度卡片最多显示的工具数量 |
 

@@ -240,21 +240,13 @@ function formatElapsed(ms) {
   return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
 }
 
-function shouldSendProgress(runState) {
-  if (runState.sendingProgress) return false;
-  const now = Date.now();
-  const elapsed = (now - runState.lastProgressSent) / 1000;
-  return elapsed >= config.progressRateLimitSec;
-}
-
 async function sendProgressCard(runId) {
   const run = activeRuns.get(runId);
   if (!run) return;
   if (run.sendingProgress) return;
   run.sendingProgress = true;
 
-  const now = Date.now();
-  const elapsed = formatElapsed(now - run.startedAt);
+  const elapsed = formatElapsed(Date.now() - run.startedAt);
 
   const progressData = {
     tools: run.tools,
@@ -268,7 +260,6 @@ async function sendProgressCard(runId) {
       const imagePath = await renderProgressImage(progressData);
       if (imagePath) {
         await sendImage(run.route, imagePath);
-        run.lastProgressSent = now;
         return;
       }
     }
@@ -286,7 +277,6 @@ async function sendProgressCard(runId) {
       lines.push(`⏳ ${run.currentTool.name}...${preview}`);
     }
     await sendReply(run.route, lines.join("\n"));
-    run.lastProgressSent = now;
   } finally {
     run.sendingProgress = false;
   }
@@ -359,7 +349,6 @@ async function handleMessage(event) {
       tools: [],
       currentTool: null,
       startedAt: Date.now(),
-      lastProgressSent: 0,
       sendingProgress: false,
       messageDelta: "",
       finalOutput: "",
@@ -391,7 +380,8 @@ async function handleMessage(event) {
 
       "message.delta"(ev) {
         runState.messageDelta += ev.delta || "";
-        if (shouldSendProgress(runState) && runState.tools.length > 0) {
+        // Send progress card on every reply (no rate limit)
+        if (!runState.sendingProgress && runState.tools.length > 0) {
           sendProgressCard(runId).catch((err) =>
             log(`progress send error: ${err.message}`)
           );
