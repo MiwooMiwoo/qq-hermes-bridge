@@ -403,10 +403,36 @@ async function handleRunComplete(runId) {
   activeRuns.delete(runId);
 
   // Send final response
-  const output = run.finalOutput || run.messageDelta;
+  let output = run.finalOutput || run.messageDelta;
   if (output?.trim()) {
     appendHistory(getSessionKey(run.route), "assistant", output);
-    await sendReplyWithMention(run.route, output, run.userMsgId);
+
+    // Parse MEDIA: tags and send images separately
+    const mediaRegex = /MEDIA:(\/[^\s\n]+)/g;
+    let remainingText = output;
+    let match;
+    const mediaPaths = [];
+
+    while ((match = mediaRegex.exec(output)) !== null) {
+      mediaPaths.push(match[1]);
+    }
+
+    // Remove MEDIA: tags from text
+    remainingText = output.replace(/MEDIA:\/[^\s\n]+/g, "").trim();
+
+    // Send images first
+    for (const imgPath of mediaPaths) {
+      try {
+        await sendReplyImage(run.route, imgPath);
+      } catch (err) {
+        log(`failed to send image ${imgPath}: ${err.message}`);
+      }
+    }
+
+    // Send remaining text (if any)
+    if (remainingText) {
+      await sendReplyWithMention(run.route, remainingText, run.userMsgId);
+    }
   }
 }
 
