@@ -40,6 +40,7 @@ async function downloadImage(imageUrl) {
 /**
  * Get image data for OneBot API.
  * Supports: base64://, https://, http://, /local/path
+ * Also handles Docker path -> host path conversion.
  */
 async function getImageData(source) {
   if (source.startsWith("base64://")) {
@@ -49,9 +50,17 @@ async function getImageData(source) {
     log(`downloading image: ${source}`);
     return await downloadImage(source);
   }
+
+  // Convert Docker path to host path if needed
+  let hostPath = source;
+  if (source.startsWith("/app/napcat/config/")) {
+    hostPath = source.replace("/app/napcat/config/", "/home/qsrhf/napcat/config/");
+    log(`converting docker path: ${source} -> ${hostPath}`);
+  }
+
   // Local file path
-  log(`reading local image: ${source}`);
-  return readLocalImage(source);
+  log(`reading local image: ${hostPath}`);
+  return readLocalImage(hostPath);
 }
 
 /**
@@ -352,7 +361,9 @@ async function handleMessage(event) {
 
       "message.delta"(ev) {
         runState.messageDelta += ev.delta || "";
+        log(`message.delta received, tools.length=${runState.tools.length}, sendingProgress=${runState.sendingProgress}`);
         if (!runState.sendingProgress && runState.tools.length > 0) {
+          log(`sending progress card`);
           sendProgressCard(runId).catch((err) =>
             log(`progress send error: ${err.message}`)
           );

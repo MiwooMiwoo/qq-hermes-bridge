@@ -72,6 +72,7 @@ export class HermesClient {
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let currentEvent = "";
 
         while (true) {
           const { done, value } = await reader.read();
@@ -83,23 +84,30 @@ export class HermesClient {
 
           for (const line of lines) {
             if (line.startsWith("event: ")) {
-              const eventType = line.slice(7).trim();
-              // Next line should be data
+              currentEvent = line.slice(7).trim();
               continue;
             }
             if (line.startsWith("data: ")) {
               try {
                 const data = JSON.parse(line.slice(6));
-                const handler = handlers[data.event] || handlers[data.type];
-                if (handler) {
-                  handler(data);
+                // Use event from SSE event line, or from data object
+                const eventType = currentEvent || data.event || data.type;
+                
+                if (eventType) {
+                  log(`SSE event: ${eventType}`);
+                  const handler = handlers[eventType];
+                  if (handler) {
+                    handler(data);
+                  }
+                  // Also call _end handler for run.completed/failed
+                  if (eventType === "run.completed" || eventType === "run.failed") {
+                    handlers._end?.();
+                  }
                 }
-                // Also call _end handler for run.completed
-                if (data.event === "run.completed" || data.event === "run.failed") {
-                  handlers._end?.();
-                }
+                
+                currentEvent = ""; // Reset for next event
               } catch (e) {
-                // Ignore parse errors
+                log(`SSE parse error: ${e.message}`);
               }
             }
           }
