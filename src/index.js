@@ -227,6 +227,54 @@ function splitText(text) {
 
 // ── Main Message Handler ──
 
+/**
+ * Send intermediate response during execution (after tool completed).
+ * Parses MEDIA: tags and sends images + text.
+ */
+async function sendIntermediateResponse(runId) {
+  const run = activeRuns.get(runId);
+  if (!run) return;
+
+  const output = run.messageDelta;
+  if (!output?.trim()) return;
+
+  // Clear messageDelta to avoid duplicate sending
+  run.messageDelta = "";
+
+  // Parse MEDIA: tags
+  const mediaRegex = /MEDIA:((?:\/|https?:\/\/)[^\s\n]+)/g;
+  const mediaItems = [];
+  let match;
+  while ((match = mediaRegex.exec(output)) !== null) {
+    mediaItems.push(match[1]);
+  }
+
+  // Remove MEDIA: tags from text
+  const remainingText = output.replace(/MEDIA:(?:\/|https?:\/\/)[^\s\n]+/g, "").trim();
+
+  // Build message segments
+  const segments = [];
+
+  // Add images
+  for (const mediaPath of mediaItems) {
+    const imgSegment = await buildImageSegment(mediaPath);
+    if (imgSegment) {
+      segments.push(imgSegment);
+    }
+  }
+
+  // Add text
+  if (remainingText) {
+    segments.push({ type: "text", data: { text: remainingText } });
+  }
+
+  // Send combined message
+  if (segments.length > 0) {
+    log(`sending intermediate response: ${segments.length} segments`);
+    await sendMessage(run.route, segments);
+  }
+}
+
 async function handleMessage(event) {
   const route =
     event.message_type === "group"
@@ -313,6 +361,14 @@ async function handleMessage(event) {
         });
         runState.currentTool = null;
         log(`tool.completed: ${ev.tool} (${ev.duration?.toFixed(1)}s)`);
+        
+        // Send current response if we have content
+        if (runState.messageDelta?.trim()) {
+          log(`sending intermediate response after tool completed`);
+          sendIntermediateResponse(runId).catch((err) =>
+            log(`intermediate response error: ${err.message}`)
+          );
+        }
       },
 
       "message.delta"(ev) {
