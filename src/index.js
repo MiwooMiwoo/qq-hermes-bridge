@@ -228,6 +228,33 @@ function splitText(text) {
 // ── Main Message Handler ──
 
 /**
+ * Send tool progress update after each tool completion.
+ * Shows which tools have been executed and their status.
+ */
+async function sendToolProgress(runId) {
+  const run = activeRuns.get(runId);
+  if (!run) return;
+
+  const tools = run.tools;
+  if (tools.length === 0) return;
+
+  // Build progress text
+  const lines = [];
+  const lastTool = tools[tools.length - 1];
+  const icon = lastTool.error ? "❌" : "✅";
+  const dur = lastTool.duration ? ` (${(lastTool.duration / 1000).toFixed(1)}s)` : "";
+  
+  lines.push(`${icon} ${lastTool.name}${dur}`);
+  
+  if (lastTool.preview) {
+    lines.push(`   ${lastTool.preview.slice(0, 80)}`);
+  }
+
+  // Send progress
+  await sendMessage(run.route, lines.join("\n"));
+}
+
+/**
  * Send intermediate response during execution (after tool completed).
  * Parses MEDIA: tags and sends images + text.
  */
@@ -362,13 +389,10 @@ async function handleMessage(event) {
         runState.currentTool = null;
         log(`tool.completed: ${ev.tool} (${ev.duration?.toFixed(1)}s)`);
         
-        // Send current response if we have content
-        if (runState.messageDelta?.trim()) {
-          log(`sending intermediate response after tool completed`);
-          sendIntermediateResponse(runId).catch((err) =>
-            log(`intermediate response error: ${err.message}`)
-          );
-        }
+        // Send progress update after each tool completion
+        sendToolProgress(runId).catch((err) =>
+          log(`tool progress error: ${err.message}`)
+        );
       },
 
       "message.delta"(ev) {
