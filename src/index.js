@@ -6,8 +6,30 @@ import {
   renderApprovalImage,
   closeRenderer,
 } from "./renderer.js";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, copyFileSync } from "fs";
+import { join, basename } from "path";
+import { randomBytes } from "crypto";
 
 const log = (msg, ...args) => console.log(`[bridge] ${msg}`, ...args);
+
+// ── Image Sharing (Host <-> Docker) ──
+
+const HOST_IMAGE_DIR = "/home/qsrhf/napcat/config/hermes-images";
+const DOCKER_IMAGE_DIR = "/app/napcat/config/hermes-images";
+
+/**
+ * Copy an image from any host path to the shared directory accessible by NapCat Docker.
+ * Returns the Docker path for OneBot API.
+ */
+function copyImageToSharedDir(hostImagePath) {
+  mkdirSync(HOST_IMAGE_DIR, { recursive: true });
+  const ext = hostImagePath.split(".").pop() || "png";
+  const name = `img_${Date.now()}_${randomBytes(4).toString("hex")}.${ext}`;
+  const hostPath = join(HOST_IMAGE_DIR, name);
+  const dockerPath = join(DOCKER_IMAGE_DIR, name);
+  copyFileSync(hostImagePath, hostPath);
+  return dockerPath;
+}
 
 // ── State ──
 
@@ -420,10 +442,13 @@ async function handleRunComplete(runId) {
     // Remove MEDIA: tags from text
     remainingText = output.replace(/MEDIA:\/[^\s\n]+/g, "").trim();
 
-    // Send images first
+    // Send images first (copy to shared dir for Docker access)
     for (const imgPath of mediaPaths) {
       try {
-        await sendReplyImage(run.route, imgPath);
+        // Copy from host cache to shared directory accessible by NapCat Docker
+        const dockerPath = copyImageToSharedDir(imgPath);
+        log(`copied image: ${imgPath} -> ${dockerPath}`);
+        await sendReplyImage(run.route, dockerPath);
       } catch (err) {
         log(`failed to send image ${imgPath}: ${err.message}`);
       }
