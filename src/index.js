@@ -16,9 +16,6 @@ const pendingApprovals = new Map();
 
 // ── Image Helpers ──
 
-/**
- * Read local image file and return base64 data string.
- */
 function readLocalImage(filePath) {
   if (!existsSync(filePath)) {
     throw new Error(`file not found: ${filePath}`);
@@ -27,9 +24,6 @@ function readLocalImage(filePath) {
   return `base64://${buffer.toString("base64")}`;
 }
 
-/**
- * Download remote image and return base64 data string.
- */
 async function downloadImage(imageUrl) {
   const resp = await fetch(imageUrl);
   if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
@@ -37,11 +31,6 @@ async function downloadImage(imageUrl) {
   return `base64://${buffer.toString("base64")}`;
 }
 
-/**
- * Get image data for OneBot API.
- * Supports: base64://, https://, http://, /local/path
- * Also handles Docker path -> host path conversion.
- */
 async function getImageData(source) {
   if (source.startsWith("base64://")) {
     return source;
@@ -58,14 +47,10 @@ async function getImageData(source) {
     log(`converting docker path: ${source} -> ${hostPath}`);
   }
 
-  // Local file path
   log(`reading local image: ${hostPath}`);
   return readLocalImage(hostPath);
 }
 
-/**
- * Build image message segment.
- */
 async function buildImageSegment(source) {
   try {
     const imageData = await getImageData(source);
@@ -168,14 +153,7 @@ function shouldTrigger(event) {
 
 // ── Message Sending ──
 
-/**
- * Send message to QQ.
- * @param {object} route - {type, groupId?, userId?}
- * @param {string|Array} message - text or message segments
- * @param {string} [replyMsgId] - optional reply target
- */
 async function sendMessage(route, message, replyMsgId) {
-  // Build segments array
   let segments = [];
 
   if (replyMsgId) {
@@ -183,7 +161,6 @@ async function sendMessage(route, message, replyMsgId) {
   }
 
   if (typeof message === "string") {
-    // Split long text
     const chunks = splitText(message);
     for (const chunk of chunks) {
       const msg = [...segments, { type: "text", data: { text: chunk } }];
@@ -225,7 +202,7 @@ function splitText(text) {
   return chunks;
 }
 
-// ── Main Message Handler ──
+// ── Message Accumulation & Sending ──
 
 /**
  * Send accumulated messageDelta as a complete message.
@@ -275,80 +252,7 @@ async function sendAccumulatedMessage(runId) {
   }
 }
 
-/**
- * Send tool progress update after each tool completion.
- * Shows which tools have been executed and their status.
- */
-async function sendToolProgress(runId) {
-  const run = activeRuns.get(runId);
-  if (!run) return;
-
-  const tools = run.tools;
-  if (tools.length === 0) return;
-
-  // Build progress text
-  const lines = [];
-  const lastTool = tools[tools.length - 1];
-  const icon = lastTool.error ? "❌" : "✅";
-  const dur = lastTool.duration ? ` (${(lastTool.duration / 1000).toFixed(1)}s)` : "";
-  
-  lines.push(`${icon} ${lastTool.name}${dur}`);
-  
-  if (lastTool.preview) {
-    lines.push(`   ${lastTool.preview.slice(0, 80)}`);
-  }
-
-  // Send progress
-  await sendMessage(run.route, lines.join("\n"));
-}
-
-/**
- * Send intermediate response during execution (after tool completed).
- * Parses MEDIA: tags and sends images + text.
- */
-async function sendIntermediateResponse(runId) {
-  const run = activeRuns.get(runId);
-  if (!run) return;
-
-  const output = run.messageDelta;
-  if (!output?.trim()) return;
-
-  // Clear messageDelta to avoid duplicate sending
-  run.messageDelta = "";
-
-  // Parse MEDIA: tags
-  const mediaRegex = /MEDIA:((?:\/|https?:\/\/)[^\s\n]+)/g;
-  const mediaItems = [];
-  let match;
-  while ((match = mediaRegex.exec(output)) !== null) {
-    mediaItems.push(match[1]);
-  }
-
-  // Remove MEDIA: tags from text
-  const remainingText = output.replace(/MEDIA:(?:\/|https?:\/\/)[^\s\n]+/g, "").trim();
-
-  // Build message segments
-  const segments = [];
-
-  // Add images
-  for (const mediaPath of mediaItems) {
-    const imgSegment = await buildImageSegment(mediaPath);
-    if (imgSegment) {
-      segments.push(imgSegment);
-    }
-  }
-
-  // Add text
-  if (remainingText) {
-    segments.push({ type: "text", data: { text: remainingText } });
-  }
-
-  // Send combined message
-  if (segments.length > 0) {
-    log(`sending intermediate response: ${segments.length} segments`);
-    await sendMessage(run.route, segments);
-  }
-}
+// ── Main Message Handler ──
 
 async function handleMessage(event) {
   const route =
@@ -445,19 +349,12 @@ async function handleMessage(event) {
         });
         runState.currentTool = null;
         log(`tool.completed: ${ev.tool} (${ev.duration?.toFixed(1)}s)`);
-        
-        // Send progress update every 15 tools
-        if (runState.tools.length % 15 === 0) {
-          sendToolProgress(runId).catch((err) =>
-            log(`tool progress error: ${err.message}`)
-          );
-        }
       },
 
       "message.delta"(ev) {
         runState.messageDelta += ev.delta || "";
         // Just accumulate, don't send progress cards
-        // Final result will be sent on run.completed
+        // Messages are sent when tool.started fires
       },
 
       "approval.request"(ev) {
