@@ -361,9 +361,15 @@ async function handleMessage(event) {
 
       "message.delta"(ev) {
         runState.messageDelta += ev.delta || "";
-        log(`message.delta received, tools.length=${runState.tools.length}, sendingProgress=${runState.sendingProgress}`);
-        if (!runState.sendingProgress && runState.tools.length > 0) {
-          log(`sending progress card`);
+        runState.deltaCount = (runState.deltaCount || 0) + 1;
+        
+        // Send progress card every 10 delta events, or when tools change
+        const shouldSend = !runState.sendingProgress && 
+                          runState.tools.length > 0 && 
+                          runState.deltaCount % 10 === 0;
+        
+        if (shouldSend) {
+          log(`sending progress card (delta #${runState.deltaCount})`);
           sendProgressCard(runId).catch((err) =>
             log(`progress send error: ${err.message}`)
           );
