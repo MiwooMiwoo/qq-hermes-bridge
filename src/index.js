@@ -13,6 +13,7 @@ const hermes = new HermesClient();
 const sessions = new Map();
 const activeRuns = new Map();
 const pendingApprovals = new Map();
+const approvalMessageSent = new Map(); // Track sent approval messages to avoid duplicates
 
 // ── Image Helpers ──
 
@@ -407,6 +408,10 @@ async function handleRunComplete(runId) {
   if (!run) return;
   activeRuns.delete(runId);
 
+  // Clean up approval tracking
+  pendingApprovals.delete(runId);
+  approvalMessageSent.delete(runId);
+
   let output = run.finalOutput || run.messageDelta;
   if (!output?.trim()) return;
 
@@ -475,6 +480,18 @@ function handleApprovalRequest(runId, ev) {
     return;
   }
 
+  // Check if we already sent an approval message for this run
+  if (approvalMessageSent.has(runId)) {
+    log(`approval: already sent message for run ${runId}, skipping duplicate`);
+    // Still update the pending approval data
+    pendingApprovals.set(runId, {
+      route: run.route,
+      data: ev,
+      runId,
+    });
+    return;
+  }
+
   log(`approval: storing pending for run ${runId}, route: ${JSON.stringify(run.route)}`);
 
   const approval = {
@@ -483,12 +500,14 @@ function handleApprovalRequest(runId, ev) {
     runId,
   };
   pendingApprovals.set(runId, approval);
+  approvalMessageSent.set(runId, true);
 
   // Auto-deny after timeout
   approval.timeoutTimer = setTimeout(async () => {
     if (pendingApprovals.has(runId)) {
       log(`approval timeout for run ${runId}, auto-denying`);
       pendingApprovals.delete(runId);
+      approvalMessageSent.delete(runId);
       try {
         const result = await hermes.approveRun(runId, "deny");
         log(`approval timeout deny result: ${result}`);
@@ -550,6 +569,7 @@ async function handleApprovalReply(route, text, msgId) {
       log(`approval reply: matched action=${action} for run ${runId}`);
       clearTimeout(approval.timeoutTimer);
       pendingApprovals.delete(runId);
+      approvalMessageSent.delete(runId); // Clean up duplicate tracking
 
       try {
         const result = await hermes.approveRun(runId, action);
