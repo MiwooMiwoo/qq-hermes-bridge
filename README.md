@@ -1,10 +1,10 @@
 # QQ-Hermes Bridge
 
-NapCat OneBot v11 ↔ Hermes Agent 桥接插件。通过 SSE 事件流实现实时进度通知和命令审批。
+NapCat OneBot v11 ↔ Hermes Agent 桥接插件。通过 SSE 事件流实现实时消息分割和图片发送。
 
 ## ✨ 特性
 
-- **SSE 流式进度** — 通过 `/v1/runs` 异步 API + `/v1/runs/{id}/events` SSE 事件流实时获取 agent 执行进度
+- **智能消息分割** — 自动检测消息边界，实现消息-工具-消息交替输出
 - **图片发送** — 支持本地文件、URL、Base64 三种方式发送图片，图片和文字合并为一条消息
 - **命令审批** — 高危命令弹出审批提示，支持回复"批准/拒绝/始终允许"
 - **会话保持** — 按群/私聊维护对话历史上下文
@@ -183,17 +183,36 @@ MEDIA:https://example.com/image.jpg
                                  └──────────┘
 ```
 
+### 消息分割机制
+
+Bridge 通过检测 `tool.started` 事件来分割消息：
+
+```
+message.delta (累积) → tool.started → 发送消息 → 工具执行
+message.delta (累积) → tool.started → 发送消息 → 工具执行
+...
+run.completed → 发送最终回复
+```
+
+这实现了类似 TUI 的消息-工具-消息交替输出效果。
+
 ### 数据流
 
 1. 用户在 QQ 发消息 → NapCat WebSocket → Bridge
 2. Bridge 调用 `POST /v1/runs` 提交异步任务
 3. Bridge 连接 `GET /v1/runs/{run_id}/events` SSE 事件流
-4. 收到 `tool.started` / `tool.completed` → 收集进度
-5. 每次收到 `message.delta` → 发送文字进度卡片
+4. 收到 `message.delta` → 累积消息内容
+5. 收到 `tool.started` → 检测到消息边界，发送累积的消息
 6. 收到 `approval.request` → 发送审批提示，等待回复
 7. 收到 `run.completed` → 发送最终回复（支持图片+文字合并）
 
 ## 📝 Changelog
+
+### v3.0.0 (2025-05-13)
+
+- **智能消息分割** — 通过 `tool.started` 事件检测消息边界
+- **移除工具进度显示** — 不再发送工具执行状态
+- **简化架构** — 核心逻辑集中在消息累积和分割
 
 ### v2.0.0 (2025-05-13)
 
