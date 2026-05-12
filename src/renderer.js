@@ -315,11 +315,10 @@ export function renderApprovalHtml({ command, riskLevel, toolName, runId, previe
 import { writeFileSync, mkdirSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { randomBytes } from "crypto";
-
-const HOST_IMAGE_DIR = "/home/qsrhf/napcat/config/hermes-images";
-const DOCKER_IMAGE_DIR = "/app/napcat/config/hermes-images";
-const MAX_IMAGES = 50; // auto-cleanup old images
-
+/**
+ * Save image to shared directory for OneBot.
+ * Returns HOST path (code runs on host, not in Docker).
+ */
 export function saveImageForOnebot(pngBuffer) {
   mkdirSync(HOST_IMAGE_DIR, { recursive: true });
   // Cleanup old files if too many
@@ -334,9 +333,8 @@ export function saveImageForOnebot(pngBuffer) {
   } catch {}
   const name = `progress_${Date.now()}_${randomBytes(4).toString("hex")}.png`;
   const hostPath = join(HOST_IMAGE_DIR, name);
-  const dockerPath = join(DOCKER_IMAGE_DIR, name);
   writeFileSync(hostPath, pngBuffer);
-  return dockerPath;
+  return hostPath; // Return host path, not Docker path
 }
 
 /**
