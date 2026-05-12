@@ -228,6 +228,54 @@ function splitText(text) {
 // ── Main Message Handler ──
 
 /**
+ * Send accumulated messageDelta as a complete message.
+ * Called when tool.started fires, indicating previous message is complete.
+ */
+async function sendAccumulatedMessage(runId) {
+  const run = activeRuns.get(runId);
+  if (!run) return;
+
+  const output = run.messageDelta;
+  if (!output?.trim()) return;
+
+  // Clear messageDelta to avoid duplicate sending
+  run.messageDelta = "";
+
+  // Parse MEDIA: tags
+  const mediaRegex = /MEDIA:((?:\/|https?:\/\/)[^\s\n]+)/g;
+  const mediaItems = [];
+  let match;
+  while ((match = mediaRegex.exec(output)) !== null) {
+    mediaItems.push(match[1]);
+  }
+
+  // Remove MEDIA: tags from text
+  const remainingText = output.replace(/MEDIA:(?:\/|https?:\/\/)[^\s\n]+/g, "").trim();
+
+  // Build message segments
+  const segments = [];
+
+  // Add images
+  for (const mediaPath of mediaItems) {
+    const imgSegment = await buildImageSegment(mediaPath);
+    if (imgSegment) {
+      segments.push(imgSegment);
+    }
+  }
+
+  // Add text
+  if (remainingText) {
+    segments.push({ type: "text", data: { text: remainingText } });
+  }
+
+  // Send combined message
+  if (segments.length > 0) {
+    log(`sending accumulated message: ${segments.length} segments`);
+    await sendMessage(run.route, segments);
+  }
+}
+
+/**
  * Send tool progress update after each tool completion.
  * Shows which tools have been executed and their status.
  */
@@ -377,6 +425,15 @@ async function handleMessage(event) {
           startedAt: ev.timestamp * 1000,
         };
         log(`tool.started: ${ev.tool}`);
+        
+        // If we have accumulated messageDelta, it means the previous message is complete
+        // Send it now before starting the next tool
+        if (runState.messageDelta?.trim()) {
+          log(`sending accumulated message before tool starts`);
+          sendAccumulatedMessage(runId).catch((err) =>
+            log(`send accumulated error: ${err.message}`)
+          );
+        }
       },
 
       "tool.completed"(ev) {
