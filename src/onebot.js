@@ -4,14 +4,13 @@ import { config } from "./config.js";
 const log = (msg, ...args) => console.log(`[onebot] ${msg}`, ...args);
 
 /**
- * Minimal OneBot v11 WebSocket client.
- * Handles connect/reconnect, event dispatch, and message sending.
+ * Minimal OneBot v11 WebSocket client for NapCat.
  */
 export class OneBotClient {
   constructor() {
     this.ws = null;
     this.selfId = config.botQq;
-    this._handlers = new Map(); // event_type -> [callback]
+    this._handlers = new Map();
     this._reconnectTimer = null;
     this._alive = false;
     this._apiCallbacks = new Map();
@@ -125,65 +124,34 @@ export class OneBotClient {
     });
   }
 
-  // ── Convenience Methods ──
+  /**
+   * Send message (text, image, or mixed segments).
+   * @param {string} messageType - "group" or "private"
+   * @param {number} targetId - groupId or userId
+   * @param {string|Array} message - text string or array of message segments
+   */
+  async sendMsg(messageType, targetId, message) {
+    const params = { message_type: messageType, message };
+    if (messageType === "group") {
+      params.group_id = Number(targetId);
+    } else {
+      params.user_id = Number(targetId);
+    }
+    return this.api("send_msg", params);
+  }
 
+  /**
+   * Send group message.
+   */
   async sendGroupMsg(groupId, message) {
-    return this.api("send_group_msg", {
-      group_id: Number(groupId),
-      message,
-    });
+    return this.sendMsg("group", groupId, message);
   }
 
+  /**
+   * Send private message.
+   */
   async sendPrivateMsg(userId, message) {
-    return this.api("send_private_msg", {
-      user_id: Number(userId),
-      message,
-    });
-  }
-
-  async sendGroupImage(groupId, imageUrl) {
-    return this.sendGroupMsg(groupId, [
-      { type: "image", data: { file: imageUrl } },
-    ]);
-  }
-
-  async sendPrivateImage(userId, imageUrl) {
-    return this.sendPrivateMsg(userId, [
-      { type: "image", data: { file: imageUrl } },
-    ]);
-  }
-
-  /**
-   * Send a forward (合并转发) message to a group.
-   * nodes: [{name, uin, content: string|array}]
-   */
-  async sendGroupForwardMsg(groupId, nodes) {
-    return this.api("send_group_forward_msg", {
-      group_id: Number(groupId),
-      message: nodes.map((n) => ({
-        type: "node",
-        data: {
-          nickname: n.name || config.botName,
-          user_id: String(n.uin || config.botQq),
-          content: typeof n.content === "string"
-            ? [{ type: "text", data: { text: n.content } }]
-            : n.content,
-        },
-      })),
-    });
-  }
-
-  /**
-   * Send a reply message referencing a specific message ID.
-   */
-  async sendGroupReply(groupId, message, replyMsgId) {
-    const content = typeof message === "string"
-      ? [{ type: "text", data: { text: message } }]
-      : message;
-    return this.sendGroupMsg(groupId, [
-      { type: "reply", data: { id: String(replyMsgId) } },
-      ...content,
-    ]);
+    return this.sendMsg("private", userId, message);
   }
 
   close() {

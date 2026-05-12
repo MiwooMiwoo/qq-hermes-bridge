@@ -1,5 +1,4 @@
 import { config } from "./config.js";
-import http from "http";
 
 const log = (msg, ...args) => console.log(`[hermes] ${msg}`, ...args);
 
@@ -12,8 +11,8 @@ export class HermesClient {
     this.apiKey = config.hermesApiKey;
   }
 
-  _headers(extra = {}) {
-    const h = { "Content-Type": "application/json", ...extra };
+  _headers() {
+    const h = { "Content-Type": "application/json" };
     if (this.apiKey) h["Authorization"] = `Bearer ${this.apiKey}`;
     return h;
   }
@@ -29,8 +28,7 @@ export class HermesClient {
       ...(conversationHistory?.length ? { conversation_history: conversationHistory } : {}),
     };
 
-    const url = `${this.baseUrl}/v1/runs`;
-    const resp = await fetch(url, {
+    const resp = await fetch(`${this.baseUrl}/v1/runs`, {
       method: "POST",
       headers: this._headers(),
       body: JSON.stringify(body),
@@ -44,46 +42,38 @@ export class HermesClient {
     const data = await resp.json();
     return {
       runId: data.run_id || data.id,
-      status: data.status,
+      statusUrl: data.status_url,
+      eventsUrl: data.events_url,
     };
   }
 
   /**
-   * Connect to SSE events stream for a run.
-   * Returns an EventEmitter-like object with 'event' callback.
-   *
-   * Events emitted:
-   *   tool.started    {tool, preview}
-   *   tool.completed  {tool, duration, error}
-   *   message.delta   {delta}
-   *   approval.request {run_id, command, risk_level, choices, ...}
-   *   run.completed   {output, usage}
-   *   run.failed      {error}
-   *   reasoning.available {text}
-   *   _end            (stream closed)
-   *   _error          (error)
+   * Stream SSE events for a run.
+   * @param {string} runId
+   * @param {Object} handlers - {eventType: callback}
+   * @returns {Object} - {close()}
    */
-  streamEvents(runId, callbacks) {
+  streamEvents(runId, handlers) {
     const url = `${this.baseUrl}/v1/runs/${runId}/events`;
-    const headers = this._headers({ Accept: "text/event-stream" });
+    let closed = false;
+    let controller = new AbortController();
 
-    let aborted = false;
-    const controller = new AbortController();
-
-    const doConnect = async () => {
+    const run = async () => {
       try {
-        const resp = await fetch(url, { headers, signal: controller.signal });
+        const resp = await fetch(url, {
+          headers: this._headers(),
+          signal: controller.signal,
+        });
+
         if (!resp.ok) {
-          const text = await resp.text().catch(() => "");
-          callbacks._error?.(new Error(`SSE ${resp.status}: ${text.slice(0, 200)}`));
-          return;
+          throw new Error(`SSE failed: ${resp.status}`);
         }
 
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
 
-        while (!aborted) {
+        while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
@@ -92,65 +82,66 @@ export class HermesClient {
           buffer = lines.pop() || "";
 
           for (const line of lines) {
+            if (line.startsWith("event: ")) {
+              const eventType = line.slice(7).trim();
+              // Next line should be data
+              continue;
+            }
             if (line.startsWith("data: ")) {
-              const jsonStr = line.slice(6).trim();
-              if (!jsonStr) continue;
               try {
-                const event = JSON.parse(jsonStr);
-                const eventType = event.event || "unknown";
-                const handler = callbacks[eventType];
-                if (handler) handler(event);
-                else callbacks._any?.(event);
-              } catch {
-                // non-JSON SSE data (keepalive comment)
+                const data = JSON.parse(line.slice(6));
+                const handler = handlers[data.event] || handlers[data.type];
+                if (handler) {
+                  handler(data);
+                }
+                // Also call _end handler for run.completed
+                if (data.event === "run.completed" || data.event === "run.failed") {
+                  handlers._end?.();
+                }
+              } catch (e) {
+                // Ignore parse errors
               }
-            } else if (line.startsWith(": stream closed")) {
-              callbacks._end?.();
-              return;
             }
           }
         }
-        callbacks._end?.();
+
+        handlers._end?.();
       } catch (err) {
-        if (!aborted) callbacks._error?.(err);
+        if (!closed) {
+          handlers._error?.(err);
+        }
       }
     };
 
-    doConnect();
+    run();
 
     return {
-      abort() {
-        aborted = true;
+      close() {
+        closed = true;
         controller.abort();
       },
     };
   }
 
   /**
-   * Approve or deny a pending command.
+   * Stop a running task.
    */
-  async resolveApproval(runId, choice) {
-    const url = `${this.baseUrl}/v1/runs/${runId}/approval`;
-    const resp = await fetch(url, {
+  async stopRun(runId) {
+    const resp = await fetch(`${this.baseUrl}/v1/runs/${runId}/stop`, {
       method: "POST",
       headers: this._headers(),
-      body: JSON.stringify({ choice }),
     });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      throw new Error(`Approval failed ${resp.status}: ${text.slice(0, 200)}`);
-    }
-    return resp.json();
+    return resp.ok;
   }
 
   /**
-   * Stop a running agent.
+   * Approve or deny a pending command.
    */
-  async stopRun(runId) {
-    const url = `${this.baseUrl}/v1/runs/${runId}/stop`;
-    const resp = await fetch(url, {
+  async approveRun(runId, action) {
+    const resp = await fetch(`${this.baseUrl}/v1/runs/${runId}/approve`, {
       method: "POST",
       headers: this._headers(),
+      body: JSON.stringify({ action }),
     });
     return resp.ok;
   }

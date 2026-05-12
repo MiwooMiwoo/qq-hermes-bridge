@@ -1,52 +1,9 @@
 import { config } from "./config.js";
 import { OneBotClient } from "./onebot.js";
 import { HermesClient } from "./hermes.js";
-import {
-  renderProgressImage,
-  renderApprovalImage,
-  closeRenderer,
-} from "./renderer.js";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
-import { join } from "path";
-import { randomBytes } from "crypto";
+import { readFileSync, existsSync } from "fs";
 
 const log = (msg, ...args) => console.log(`[bridge] ${msg}`, ...args);
-
-// ── Image Helpers ──
-
-const SHARED_IMAGE_DIR = "/home/qsrhf/napcat/config/hermes-images";
-
-/**
- * Read image file and return base64 data URI for OneBot.
- */
-function imageToBase64(filePath) {
-  const buffer = readFileSync(filePath);
-  const ext = filePath.split(".").pop()?.toLowerCase() || "png";
-  const mime = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" }[ext] || "image/png";
-  return `base64://${buffer.toString("base64")}`;
-}
-
-/**
- * Download image from URL and return base64 data URI.
- */
-async function downloadImageAsBase64(imageUrl) {
-  const resp = await fetch(imageUrl);
-  if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
-  const buffer = Buffer.from(await resp.arrayBuffer());
-  const contentType = resp.headers.get("content-type") || "image/jpeg";
-  return `base64://${buffer.toString("base64")}`;
-}
-
-/**
- * Save image to shared directory for NapCat Docker access.
- * Returns host path.
- */
-function saveToSharedDir(filename, buffer) {
-  mkdirSync(SHARED_IMAGE_DIR, { recursive: true });
-  const hostPath = join(SHARED_IMAGE_DIR, filename);
-  writeFileSync(hostPath, buffer);
-  return hostPath;
-}
 
 // ── State ──
 
@@ -57,32 +14,86 @@ const sessions = new Map();
 const activeRuns = new Map();
 const pendingApprovals = new Map();
 
-// ── Session Helpers ──
+// ── Image Helpers ──
 
-function getSessionKey(route, sessionSuffix = 0) {
-  const base = route.type === "group" ? `group:${route.groupId}` : `user:${route.userId}`;
-  return sessionSuffix > 0 ? `${base}:v${sessionSuffix}` : base;
+/**
+ * Read local image file and return base64 data string.
+ */
+function readLocalImage(filePath) {
+  if (!existsSync(filePath)) {
+    throw new Error(`file not found: ${filePath}`);
+  }
+  const buffer = readFileSync(filePath);
+  return `base64://${buffer.toString("base64")}`;
 }
 
-function getSession(sessionKey) {
-  if (!sessions.has(sessionKey)) {
-    sessions.set(sessionKey, { history: [], sessionVersion: 0 });
+/**
+ * Download remote image and return base64 data string.
+ */
+async function downloadImage(imageUrl) {
+  const resp = await fetch(imageUrl);
+  if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  return `base64://${buffer.toString("base64")}`;
+}
+
+/**
+ * Get image data for OneBot API.
+ * Supports: base64://, https://, http://, /local/path
+ */
+async function getImageData(source) {
+  if (source.startsWith("base64://")) {
+    return source;
   }
-  return sessions.get(sessionKey);
+  if (source.startsWith("http://") || source.startsWith("https://")) {
+    log(`downloading image: ${source}`);
+    return await downloadImage(source);
+  }
+  // Local file path
+  log(`reading local image: ${source}`);
+  return readLocalImage(source);
+}
+
+/**
+ * Build image message segment.
+ */
+async function buildImageSegment(source) {
+  try {
+    const imageData = await getImageData(source);
+    return { type: "image", data: { file: imageData } };
+  } catch (err) {
+    log(`failed to get image: ${source}: ${err.message}`);
+    return null;
+  }
+}
+
+// ── Session Helpers ──
+
+function getSessionKey(route, version = 0) {
+  const base = route.type === "group" ? `group:${route.groupId}` : `user:${route.userId}`;
+  return version > 0 ? `${base}:v${version}` : base;
+}
+
+function getSession(route) {
+  const key = getSessionKey(route);
+  if (!sessions.has(key)) {
+    sessions.set(key, { history: [], version: 0 });
+  }
+  return sessions.get(key);
 }
 
 function clearSession(route) {
-  const baseKey = getSessionKey(route, 0);
-  const sess = sessions.get(baseKey);
+  const key = getSessionKey(route);
+  const sess = sessions.get(key);
   if (sess) {
-    sess.sessionVersion = (sess.sessionVersion || 0) + 1;
+    sess.version = (sess.version || 0) + 1;
     sess.history = [];
   }
-  return sess?.sessionVersion || 0;
+  return sess?.version || 0;
 }
 
-function appendHistory(sessionKey, role, content) {
-  const sess = getSession(sessionKey);
+function appendHistory(route, role, content) {
+  const sess = getSession(route);
   sess.history.push({ role, content });
   const max = config.localHistoryMaxMessages * 2;
   if (sess.history.length > max) {
@@ -146,71 +157,44 @@ function shouldTrigger(event) {
   return { triggered: false };
 }
 
-// ── Reply Helpers ──
-
-async function sendReply(route, text) {
-  const chunks = splitMessage(text);
-  for (const chunk of chunks) {
-    if (route.type === "group") {
-      await onebot.sendGroupMsg(route.groupId, chunk);
-    } else {
-      await onebot.sendPrivateMsg(route.userId, chunk);
-    }
-  }
-}
+// ── Message Sending ──
 
 /**
- * Send image via base64 (most reliable method).
+ * Send message to QQ.
  * @param {object} route - {type, groupId?, userId?}
- * @param {string} source - file path or URL
+ * @param {string|Array} message - text or message segments
+ * @param {string} [replyMsgId] - optional reply target
  */
-async function sendImage(route, source) {
-  try {
-    let imageData;
-    
-    if (source.startsWith("http://") || source.startsWith("https://")) {
-      // Download remote image
-      log(`downloading image: ${source}`);
-      imageData = await downloadImageAsBase64(source);
-    } else if (source.startsWith("base64://")) {
-      // Already base64
-      imageData = source;
-    } else {
-      // Read local file
-      log(`reading local image: ${source}`);
-      if (!existsSync(source)) {
-        throw new Error(`file not found: ${source}`);
-      }
-      imageData = imageToBase64(source);
-    }
-    
-    // Send via OneBot
-    if (route.type === "group") {
-      await onebot.sendGroupImage(route.groupId, imageData);
-    } else {
-      await onebot.sendPrivateImage(route.userId, imageData);
-    }
-    
-    log(`image sent successfully`);
-    return true;
-  } catch (err) {
-    log(`image send failed: ${err.message}`);
-    return false;
-  }
-}
+async function sendMessage(route, message, replyMsgId) {
+  // Build segments array
+  let segments = [];
 
-async function sendReplyWithMention(route, text, userMsgId) {
-  if (route.type === "group" && userMsgId) {
-    const chunks = splitMessage(text);
+  if (replyMsgId) {
+    segments.push({ type: "reply", data: { id: String(replyMsgId) } });
+  }
+
+  if (typeof message === "string") {
+    // Split long text
+    const chunks = splitText(message);
     for (const chunk of chunks) {
-      await onebot.sendGroupReply(route.groupId, chunk, userMsgId);
+      const msg = [...segments, { type: "text", data: { text: chunk } }];
+      await sendSegments(route, msg);
     }
-  } else {
-    await sendReply(route, text);
+  } else if (Array.isArray(message)) {
+    segments.push(...message);
+    await sendSegments(route, segments);
   }
 }
 
-function splitMessage(text) {
+async function sendSegments(route, segments) {
+  if (route.type === "group") {
+    await onebot.sendGroupMsg(route.groupId, segments);
+  } else {
+    await onebot.sendPrivateMsg(route.userId, segments);
+  }
+}
+
+function splitText(text) {
   if (text.length <= config.maxMessageLength) return [text];
   const chunks = [];
   let remaining = text;
@@ -242,41 +226,34 @@ function formatElapsed(ms) {
 
 async function sendProgressCard(runId) {
   const run = activeRuns.get(runId);
-  if (!run) return;
-  if (run.sendingProgress) return;
+  if (!run || run.sendingProgress) return;
   run.sendingProgress = true;
 
-  const elapsed = formatElapsed(Date.now() - run.startedAt);
-
-  const progressData = {
-    tools: run.tools,
-    currentTool: run.currentTool,
-    messageDelta: run.messageDelta,
-    elapsed,
-  };
-
   try {
-    if (config.progressAsImage) {
-      const imagePath = await renderProgressImage(progressData);
-      if (imagePath) {
-        await sendImage(run.route, imagePath);
-        return;
-      }
-    }
-
-    // Fallback to text
+    const elapsed = formatElapsed(Date.now() - run.startedAt);
     const lines = [`⏳ Hermes 执行中 (${elapsed})`];
+
     for (const t of run.tools.slice(-8)) {
       const icon = t.error ? "❌" : "✅";
       const dur = t.duration ? ` (${formatElapsed(t.duration)})` : "";
-      const preview = t.preview ? ` → ${t.preview.slice(0, 80)}` : "";
+      const preview = t.preview ? ` → ${t.preview.slice(0, 60)}` : "";
       lines.push(`${icon} ${t.name}${dur}${preview}`);
     }
+
     if (run.currentTool) {
-      const preview = run.currentTool.preview ? ` → ${run.currentTool.preview.slice(0, 80)}` : "";
+      const preview = run.currentTool.preview ? ` → ${run.currentTool.preview.slice(0, 60)}` : "";
       lines.push(`⏳ ${run.currentTool.name}...${preview}`);
     }
-    await sendReply(run.route, lines.join("\n"));
+
+    // Add response preview if available
+    if (run.messageDelta) {
+      const preview = run.messageDelta.slice(-200);
+      lines.push("");
+      lines.push("📝 回复预览:");
+      lines.push(preview);
+    }
+
+    await sendMessage(run.route, lines.join("\n"));
   } finally {
     run.sendingProgress = false;
   }
@@ -315,30 +292,26 @@ async function handleMessage(event) {
   // Check for clear context command
   if (text === "清除上下文" || text === "新对话" || text.toLowerCase() === "new" || text.toLowerCase() === "reset") {
     const newVersion = clearSession(route);
-    await sendReplyWithMention(route, `✅ 上下文已清除，开始新对话 (v${newVersion})`, event.message_id);
+    await sendMessage(route, `✅ 上下文已清除，开始新对话 (v${newVersion})`, event.message_id);
     return;
   }
 
   // Build user prompt
   const contextLabel =
     route.type === "group"
-      ? `当前来自 QQ 群 ${route.groupId}。发送者: ${event.sender?.nickname || route.userId} (${route.userId})。请按 QQ 聊天风格回复。`
+      ? `当前来自 QQ 群 ${route.groupId}。发送者: ${event.sender?.nickname || route.userId} (${route.userId})。`
       : `当前来自 QQ 私聊。发送者: ${event.sender?.nickname || route.userId} (${route.userId})。`;
   const userPrompt = `${contextLabel}\n\n${text}`;
 
-  const sessionKey = getSessionKey(route);
-  const session = getSession(sessionKey);
-  const sessionVersion = session.sessionVersion || 0;
-  const versionedSessionKey = getSessionKey(route, sessionVersion);
-  appendHistory(sessionKey, "user", text);
-
-  const systemPrompt = config.systemPrompt || undefined;
+  const session = getSession(route);
+  const sessionId = getSessionKey(route, session.version);
+  appendHistory(route, "user", text);
 
   try {
     const { runId } = await hermes.submitRun({
       userMessage: userPrompt,
-      sessionId: versionedSessionKey,
-      systemPrompt,
+      sessionId,
+      systemPrompt: config.systemPrompt || undefined,
       conversationHistory: session.history.slice(0, -1),
     });
 
@@ -367,20 +340,18 @@ async function handleMessage(event) {
       },
 
       "tool.completed"(ev) {
-        const tool = {
+        runState.tools.push({
           name: ev.tool,
           duration: (ev.duration || 0) * 1000,
           error: ev.error || false,
           preview: runState.currentTool?.preview,
-        };
-        runState.tools.push(tool);
+        });
         runState.currentTool = null;
         log(`tool.completed: ${ev.tool} (${ev.duration?.toFixed(1)}s)`);
       },
 
       "message.delta"(ev) {
         runState.messageDelta += ev.delta || "";
-        // Send progress card on every reply (no rate limit)
         if (!runState.sendingProgress && runState.tools.length > 0) {
           sendProgressCard(runId).catch((err) =>
             log(`progress send error: ${err.message}`)
@@ -417,7 +388,7 @@ async function handleMessage(event) {
     runState.stream = stream;
   } catch (err) {
     log(`submit error: ${err.message}`);
-    await sendReplyWithMention(route, `❌ 调用 Hermes 失败: ${err.message}`, event.message_id);
+    await sendMessage(route, `❌ 调用 Hermes 失败: ${err.message}`, event.message_id);
   }
 }
 
@@ -431,14 +402,12 @@ async function handleRunComplete(runId) {
   let output = run.finalOutput || run.messageDelta;
   if (!output?.trim()) return;
 
-  appendHistory(getSessionKey(run.route), "assistant", output);
+  appendHistory(run.route, "assistant", output);
 
   // Parse MEDIA: tags
-  // Supports: MEDIA:/path/to/file.png, MEDIA:https://example.com/img.jpg
   const mediaRegex = /MEDIA:((?:\/|https?:\/\/)[^\s\n]+)/g;
   const mediaItems = [];
   let match;
-
   while ((match = mediaRegex.exec(output)) !== null) {
     mediaItems.push(match[1]);
   }
@@ -446,88 +415,25 @@ async function handleRunComplete(runId) {
   // Remove MEDIA: tags from text
   const remainingText = output.replace(/MEDIA:(?:\/|https?:\/\/)[^\s\n]+/g, "").trim();
 
-  if (mediaItems.length > 0) {
-    // Build combined message with images + text
-    const messageSegments = [];
+  // Build message segments
+  const segments = [];
 
-    for (const mediaPath of mediaItems) {
-      try {
-        const imageData = await getImageData(mediaPath);
-        if (imageData) {
-          messageSegments.push({ type: "image", data: { file: imageData } });
-        }
-      } catch (err) {
-        log(`failed to get image data: ${mediaPath}: ${err.message}`);
-      }
-    }
-
-    // Add text segment
-    if (remainingText) {
-      messageSegments.push({ type: "text", data: { text: remainingText } });
-    }
-
-    // Send combined message
-    if (messageSegments.length > 0) {
-      await sendCombinedMessage(run.route, messageSegments, run.userMsgId);
-    }
-  } else {
-    // No images, just send text
-    if (remainingText) {
-      await sendReplyWithMention(run.route, remainingText, run.userMsgId);
-    }
-  }
-}
-
-/**
- * Get image data (base64) from path or URL.
- */
-async function getImageData(source) {
-  if (source.startsWith("http://") || source.startsWith("https://")) {
-    log(`downloading image: ${source}`);
-    const resp = await fetch(source);
-    if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
-    const buffer = Buffer.from(await resp.arrayBuffer());
-    return `base64://${buffer.toString("base64")}`;
-  } else if (source.startsWith("base64://")) {
-    return source;
-  } else {
-    log(`reading local image: ${source}`);
-    if (!existsSync(source)) {
-      throw new Error(`file not found: ${source}`);
-    }
-    const buffer = readFileSync(source);
-    return `base64://${buffer.toString("base64")}`;
-  }
-}
-
-/**
- * Send combined message with images and text in one message.
- */
-async function sendCombinedMessage(route, segments, replyMsgId) {
-  // Split long text into chunks if needed
-  const finalSegments = [];
-  for (const seg of segments) {
-    if (seg.type === "text") {
-      // For combined messages, we keep text as one segment
-      // (splitting would break the image+text pairing)
-      finalSegments.push(seg);
-    } else {
-      finalSegments.push(seg);
+  // Add images
+  for (const mediaPath of mediaItems) {
+    const imgSegment = await buildImageSegment(mediaPath);
+    if (imgSegment) {
+      segments.push(imgSegment);
     }
   }
 
-  if (route.type === "group") {
-    if (replyMsgId) {
-      // Add reply segment at the beginning
-      await onebot.sendGroupMsg(route.groupId, [
-        { type: "reply", data: { id: String(replyMsgId) } },
-        ...finalSegments,
-      ]);
-    } else {
-      await onebot.sendGroupMsg(route.groupId, finalSegments);
-    }
-  } else {
-    await onebot.sendPrivateMsg(route.userId, finalSegments);
+  // Add text
+  if (remainingText) {
+    segments.push({ type: "text", data: { text: remainingText } });
+  }
+
+  // Send combined message
+  if (segments.length > 0) {
+    await sendMessage(run.route, segments, run.userMsgId);
   }
 }
 
@@ -540,11 +446,11 @@ async function handleStopCommand(route) {
       (route.type === "user" && run.route.userId === route.userId)
     ) {
       await hermes.stopRun(runId);
-      await sendReply(route, "已停止当前任务 ✋");
+      await sendMessage(route, "已停止当前任务 ✋");
       return;
     }
   }
-  await sendReply(route, "当前没有正在运行的任务");
+  await sendMessage(route, "当前没有正在运行的任务");
 }
 
 // ── Approval Handling ──
@@ -567,43 +473,24 @@ function handleApprovalRequest(runId, ev) {
     if (pendingApprovals.has(runId)) {
       pendingApprovals.delete(runId);
       await hermes.approveRun(runId, "deny");
-      await sendReply(run.route, "⏰ 审批超时，已自动拒绝");
+      await sendMessage(run.route, "⏰ 审批超时，已自动拒绝");
     }
   }, config.approvalTimeoutSec * 1000);
 
   // Send approval request
-  sendApprovalCard(run.route, ev, runId).catch((err) =>
-    log(`approval card send error: ${err.message}`)
+  const lines = [
+    `⚠️ 需要审批`,
+    `命令: ${ev.command || ev.description || "未知"}`,
+    ev.tool ? `工具: ${ev.tool}` : "",
+    ``,
+    `回复 "批准" / "通过" — 允许一次`,
+    `回复 "拒绝" / "deny" — 拒绝执行`,
+    `回复 "始终允许" — 本次会话内始终允许`,
+  ].filter(Boolean);
+
+  sendMessage(run.route, lines.join("\n")).catch((err) =>
+    log(`approval send error: ${err.message}`)
   );
-}
-
-async function sendApprovalCard(route, approval, runId) {
-  try {
-    const imagePath = await renderApprovalImage({
-      command: approval.command || approval.description,
-      riskLevel: approval.risk_level || "medium",
-      toolName: approval.tool,
-      runId,
-      preview: approval.preview,
-    });
-
-    if (imagePath) {
-      await sendImage(route, imagePath);
-    } else {
-      // Fallback to text
-      const lines = [
-        `⚠️ 需要审批`,
-        `命令: ${approval.command || approval.description}`,
-        ``,
-        `回复 "批准" 或 "通过" 允许一次`,
-        `回复 "拒绝" 或 "deny" 拒绝执行`,
-        `回复 "始终允许" 本次会话内始终允许`,
-      ];
-      await sendReply(route, lines.join("\n"));
-    }
-  } catch (err) {
-    log(`approval card error: ${err.message}`);
-  }
 }
 
 async function handleApprovalReply(route, text, msgId) {
@@ -636,7 +523,7 @@ async function handleApprovalReply(route, text, msgId) {
         session: "已允许本次会话 ✅",
       }[action];
 
-      await sendReplyWithMention(route, statusText, msgId);
+      await sendMessage(route, statusText, msgId);
       return true;
     }
   }
@@ -658,11 +545,9 @@ export async function start() {
 export async function stop() {
   log("stopping bridge...");
   onebot.close();
-  await closeRenderer();
   log("bridge stopped");
 }
 
-// Handle shutdown
 process.on("SIGINT", async () => {
   await stop();
   process.exit(0);
@@ -673,7 +558,6 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 
-// Auto-start
 start().catch((err) => {
   log(`failed to start: ${err.message}`);
   process.exit(1);

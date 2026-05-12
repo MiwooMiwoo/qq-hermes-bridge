@@ -61,11 +61,6 @@ export const config = {
   requireMention: parseBool(env.REQUIRE_MENTION, true),
   keywordTriggers: parseList(env.KEYWORD_TRIGGERS).map((k) => k.toLowerCase()),
 
-  // Progress
-  progressRateLimitSec: parseInt(env.PROGRESS_RATE_LIMIT_SECONDS, 15),
-  progressAsImage: parseBool(env.PROGRESS_AS_IMAGE, true),
-  progressMaxTools: parseInt(env.PROGRESS_MAX_TOOLS, 12),
-
   // Messages
   maxMessageLength: parseInt(env.MAX_MESSAGE_LENGTH, 1200),
   systemPrompt: env.SYSTEM_PROMPT || "",
